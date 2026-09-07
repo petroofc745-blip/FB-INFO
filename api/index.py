@@ -71,14 +71,12 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             profile_url = f"https://www.facebook.com/{username}"
-            oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url=https://www.facebook.com/{username}"
+            oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={urllib.parse.quote(profile_url, safe='')}"
             
-            # Simplified headers to avoid infinite redirect loops triggered by mobile host mismatch
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Connection": "keep-alive"
+                "Accept": "application/json,text/html,*/*"
             }
 
             name = None
@@ -86,50 +84,53 @@ class handler(BaseHTTPRequestHandler):
             profile_pic = None
             description = None
 
-            # Fetch via oEmbed first as it's safe and doesn't get caught in redirect loops
+            # 1. Fetch oEmbed API (Guaranteed to return metadata blockquote with stats without getting blocked or redirected)
             try:
                 oembed_resp = requests.get(oembed_url, headers=headers, timeout=2.5, allow_redirects=True)
                 if oembed_resp.status_code == 200:
                     data = oembed_resp.json()
                     name = data.get("title")
                     html_snippet = data.get("html", "")
+                    
                     soup = BeautifulSoup(html_snippet, 'html.parser')
                     block_quote = soup.find("blockquote")
                     if block_quote:
                         description = block_quote.get_text(strip=True)
-                    id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet)
+                    
+                    id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
                     if id_match:
                         user_id = id_match.group(1)
             except Exception:
                 pass
 
-            # Safe raw profile check with redirect limit protection
-            if not name or not user_id or not description:
+            # 2. Fallback / supplementary direct fetch to graph API / Graph search mobile endpoints if oembed misses anything
+            if not user_id or not description or not name:
                 try:
-                    raw_response = requests.get(profile_url, headers=headers, timeout=2.5, allow_redirects=True, max_redirects=5)
+                    mobile_url = f"https://m.facebook.com/{username}"
+                    raw_response = requests.get(mobile_url, headers=headers, timeout=2.5, allow_redirects=True)
                     if raw_response.status_code == 200:
                         raw_text = raw_response.text
                         
-                        og_title_match = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
-                        if og_title_match and not name:
-                            name = og_title_match.group(1).replace(" | Facebook", "").strip()
+                        if not name:
+                            og_title = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                            if og_title:
+                                name = og_title.group(1).replace(" | Facebook", "").strip()
 
-                        og_image_match = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
-                        if og_image_match:
-                            profile_pic = og_image_match.group(1)
-                            media_id_match = re.search(r'media_id=(\d+)', profile_pic)
-                            if media_id_match and not user_id:
-                                user_id = media_id_match.group(1)
+                        if not profile_pic:
+                            og_img = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                            if og_img:
+                                profile_pic = og_img.group(1)
 
-                        og_desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
-                        if og_desc_match and not description:
-                            description = og_desc_match.group(1)
+                        if not description:
+                            og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                            if og_desc:
+                                description = og_desc.group(1)
 
                         if not user_id:
-                            for pattern in [r'"entity_id":"(\d+)"', r'"page_id":"(\d+)"', r'profile_id=(\d+)']:
-                                match = re.search(pattern, raw_text)
-                                if match:
-                                    user_id = match.group(1)
+                            for pattern in [r'entity_id["\s:]+"(\d+)"', r'page_id["\s:]+"(\d+)"', r'profile_id=(\d+)', r'media_id=(\d+)']:
+                                m = re.search(pattern, raw_text)
+                                if m:
+                                    user_id = m.group(1)
                                     break
                 except Exception:
                     pass
