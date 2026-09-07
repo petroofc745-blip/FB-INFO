@@ -79,8 +79,8 @@ class handler(BaseHTTPRequestHandler):
                 "Accept": "application/json,text/html,*/*"
             }
 
-            # Fast single oEmbed fetch
-            response = requests.get(oembed_url, headers=headers, timeout=4)
+            # Fast single oEmbed fetch (increased timeout to prevent premature read timeouts)
+            response = requests.get(oembed_url, headers=headers, timeout=8)
             
             name = None
             user_id = None
@@ -104,7 +104,7 @@ class handler(BaseHTTPRequestHandler):
 
             # Fast parallel metadata check if oEmbed misses image/ID
             if not profile_pic or not user_id:
-                raw_response = requests.get(profile_url, headers=headers, timeout=4)
+                raw_response = requests.get(profile_url, headers=headers, timeout=8)
                 if raw_response.status_code == 200:
                     raw_text = raw_response.text
                     
