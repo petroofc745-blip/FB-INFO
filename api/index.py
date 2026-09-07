@@ -71,12 +71,14 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             profile_url = f"https://www.facebook.com/{username}"
+            mobile_url = f"https://m.facebook.com/{username}"
             oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={urllib.parse.quote(profile_url, safe='')}"
             
             headers = {
-                "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "application/json,text/html,*/*"
+                "Connection": "keep-alive"
             }
 
             name = None
@@ -84,54 +86,49 @@ class handler(BaseHTTPRequestHandler):
             profile_pic = None
             description = None
 
-            # 1. Fetch oEmbed API (Guaranteed to return metadata blockquote with stats without getting blocked or redirected)
+            # 1. Fetch mobile version directly to grab standard public OpenGraph tags without login wall blocks
             try:
-                oembed_resp = requests.get(oembed_url, headers=headers, timeout=2.5, allow_redirects=True)
-                if oembed_resp.status_code == 200:
-                    data = oembed_resp.json()
-                    name = data.get("title")
-                    html_snippet = data.get("html", "")
+                raw_response = requests.get(mobile_url, headers=headers, timeout=2.5, allow_redirects=True)
+                if raw_response.status_code == 200:
+                    raw_text = raw_response.text
                     
-                    soup = BeautifulSoup(html_snippet, 'html.parser')
-                    block_quote = soup.find("blockquote")
-                    if block_quote:
-                        description = block_quote.get_text(strip=True)
-                    
-                    id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
-                    if id_match:
-                        user_id = id_match.group(1)
+                    og_title = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                    if og_title:
+                        name = og_title.group(1).replace(" | Facebook", "").strip()
+
+                    og_img = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                    if og_img:
+                        profile_pic = og_img.group(1)
+
+                    og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                    if og_desc:
+                        description = og_desc.group(1)
+
+                    for pattern in [r'entity_id["\s:]+"(\d+)"', r'page_id["\s:]+"(\d+)"', r'profile_id=(\d+)', r'media_id=(\d+)', r'"ownerId":"(\d+)"']:
+                        m = re.search(pattern, raw_text)
+                        if m:
+                            user_id = m.group(1)
+                            break
             except Exception:
                 pass
 
-            # 2. Fallback / supplementary direct fetch to graph API / Graph search mobile endpoints if oembed misses anything
-            if not user_id or not description or not name:
+            # 2. Fallback to oEmbed if description or name is missing
+            if not description or not name:
                 try:
-                    mobile_url = f"https://m.facebook.com/{username}"
-                    raw_response = requests.get(mobile_url, headers=headers, timeout=2.5, allow_redirects=True)
-                    if raw_response.status_code == 200:
-                        raw_text = raw_response.text
-                        
+                    oembed_resp = requests.get(oembed_url, headers=headers, timeout=2.0, allow_redirects=True)
+                    if oembed_resp.status_code == 200:
+                        data = oembed_resp.json()
                         if not name:
-                            og_title = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
-                            if og_title:
-                                name = og_title.group(1).replace(" | Facebook", "").strip()
-
-                        if not profile_pic:
-                            og_img = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
-                            if og_img:
-                                profile_pic = og_img.group(1)
-
-                        if not description:
-                            og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
-                            if og_desc:
-                                description = og_desc.group(1)
-
+                            name = data.get("title")
+                        html_snippet = data.get("html", "")
+                        soup = BeautifulSoup(html_snippet, 'html.parser')
+                        block_quote = soup.find("blockquote")
+                        if block_quote and not description:
+                            description = block_quote.get_text(strip=True)
                         if not user_id:
-                            for pattern in [r'entity_id["\s:]+"(\d+)"', r'page_id["\s:]+"(\d+)"', r'profile_id=(\d+)', r'media_id=(\d+)']:
-                                m = re.search(pattern, raw_text)
-                                if m:
-                                    user_id = m.group(1)
-                                    break
+                            id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet)
+                            if id_match:
+                                user_id = id_match.group(1)
                 except Exception:
                     pass
 
@@ -141,18 +138,10 @@ class handler(BaseHTTPRequestHandler):
             if not name:
                 name = username.capitalize()
 
-            found_emails = []
-            found_phones = []
             followers = None
             likes = None
 
             if description:
-                email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-                phone_pattern = r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
-
-                found_emails = list(set(re.findall(email_pattern, description)))
-                found_phones = list(set(re.findall(phone_pattern, description)))
-
                 followers_match = re.search(r'([\d.,]+[KkMmBb]?)\s*(?:followers|subscribers)', description, re.IGNORECASE)
                 if followers_match:
                     followers = followers_match.group(1)
@@ -172,10 +161,6 @@ class handler(BaseHTTPRequestHandler):
                 "page_stats": {
                     "followers": followers,
                     "likes": likes
-                },
-                "extracted_contacts": {
-                    "emails": found_emails if found_emails else None,
-                    "phones": found_phones if found_phones else None
                 }
             }
 
