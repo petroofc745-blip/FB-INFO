@@ -71,14 +71,23 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             profile_url = f"https://www.facebook.com/{username}"
-            oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={urllib.parse.quote(profile_url, safe='')}"
             
-            # Using Facebook's externalhit scraper UA to safely read public metadata without hitting login walls
+            # Using standard desktop browser headers that safely bypass login wall blocks for public profiles/pages
             headers = {
-                "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Connection": "keep-alive"
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Cache-Control": "max-age=0",
+                "Sec-Ch-Ua": "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": "\"Windows\"",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1"
             }
 
             name = None
@@ -86,62 +95,74 @@ class handler(BaseHTTPRequestHandler):
             profile_pic = None
             description = None
 
-            # 1. Fetch via oEmbed API first (Most reliable for public pages like Meta without login redirect blocks)
+            # Fetch the public web page directly
             try:
-                oembed_resp = requests.get(oembed_url, headers=headers, timeout=2.5, allow_redirects=True)
-                if oembed_resp.status_code == 200:
-                    data = oembed_resp.json()
-                    name = data.get("title")
-                    html_snippet = data.get("html", "")
+                raw_response = requests.get(profile_url, headers=headers, timeout=3.0, allow_redirects=True)
+                if raw_response.status_code == 200:
+                    raw_text = raw_response.text
                     
-                    soup = BeautifulSoup(html_snippet, 'html.parser')
-                    block_quote = soup.find("blockquote")
-                    if block_quote:
-                        description = block_quote.get_text(strip=True)
-                    
-                    id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
-                    if id_match:
-                        user_id = id_match.group(1)
+                    # Extract Name from OpenGraph title
+                    og_title = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                    if og_title:
+                        t = og_title.group(1).replace(" | Facebook", "").strip()
+                        if "Log into Facebook" not in t:
+                            name = t
+
+                    # Extract Profile Picture from OpenGraph image
+                    og_img = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                    if og_img:
+                        profile_pic = og_img.group(1)
+                        media_id_match = re.search(r'media_id=(\d+)', profile_pic)
+                        if media_id_match:
+                            user_id = media_id_match.group(1)
+
+                    # Extract Bio / Description from OpenGraph description
+                    og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                    if og_desc:
+                        d = og_desc.group(1)
+                        if "Log into Facebook" not in d:
+                            description = d
+
+                    # Deep search fallback patterns for internal IDs & numeric Profile IDs
+                    if not user_id:
+                        id_patterns = [
+                            r'"entity_id":"(\d+)"',
+                            r'"page_id":"(\d+)"',
+                            r'profile_id=(\d+)',
+                            r'"ownerId":"(\d+)"',
+                            r'"userID":"(\d+)"',
+                            r'fb://profile/(\d+)'
+                        ]
+                        for pattern in id_patterns:
+                            m = re.search(pattern, raw_text)
+                            if m:
+                                user_id = m.group(1)
+                                break
             except Exception:
                 pass
 
-            # 2. Supplementary direct fetch using externalhit UA if oembed info is partial
-            if not user_id or not description or not name:
+            # Fallback to oEmbed endpoint if main page scrape missed details
+            if not description or not name or not user_id:
                 try:
-                    raw_response = requests.get(profile_url, headers=headers, timeout=2.5, allow_redirects=True)
-                    if raw_response.status_code == 200:
-                        raw_text = raw_response.text
-                        
-                        # Guard against generic login wall text
-                        if "Log into Facebook" not in raw_text:
-                            if not name:
-                                og_title = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
-                                if og_title:
-                                    t = og_title.group(1).replace(" | Facebook", "").strip()
-                                    if "Log into Facebook" not in t:
-                                        name = t
-
-                            if not profile_pic:
-                                og_img = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
-                                if og_img:
-                                    profile_pic = og_img.group(1)
-
-                            if not description:
-                                og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
-                                if og_desc:
-                                    d = og_desc.group(1)
-                                    if "Log into Facebook" not in d:
-                                        description = d
-
-                            if not user_id:
-                                for pattern in [r'entity_id["\s:]+"(\d+)"', r'page_id["\s:]+"(\d+)"', r'profile_id=(\d+)', r'media_id=(\d+)', r'"ownerId":"(\d+)"']:
-                                    m = re.search(pattern, raw_text)
-                                    if m:
-                                        user_id = m.group(1)
-                                        break
+                    oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={urllib.parse.quote(profile_url, safe='')}"
+                    oembed_resp = requests.get(oembed_url, headers=headers, timeout=2.0, allow_redirects=True)
+                    if oembed_resp.status_code == 200:
+                        data = oembed_resp.json()
+                        if not name:
+                            name = data.get("title")
+                        html_snippet = data.get("html", "")
+                        soup = BeautifulSoup(html_snippet, 'html.parser')
+                        block_quote = soup.find("blockquote")
+                        if block_quote and not description:
+                            description = block_quote.get_text(strip=True)
+                        if not user_id:
+                            id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet)
+                            if id_match:
+                                user_id = id_match.group(1)
                 except Exception:
                     pass
 
+            # Fallback construct profile image via crawler if user_id is found
             if user_id and not profile_pic:
                 profile_pic = f"https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={user_id}"
 
