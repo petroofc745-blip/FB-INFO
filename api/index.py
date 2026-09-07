@@ -71,8 +71,6 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             profile_url = f"https://www.facebook.com/{username}"
-            
-            # Step 1: Query Facebook's Public oEmbed Plugin Endpoint
             oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={profile_url}"
             
             headers = {
@@ -81,7 +79,8 @@ class handler(BaseHTTPRequestHandler):
                 "Accept": "application/json,text/html,*/*"
             }
 
-            response = requests.get(oembed_url, headers=headers, timeout=10)
+            # Fast single oEmbed fetch
+            response = requests.get(oembed_url, headers=headers, timeout=4)
             
             name = None
             user_id = None
@@ -91,44 +90,48 @@ class handler(BaseHTTPRequestHandler):
             if response.status_code == 200:
                 data = response.json()
                 name = data.get("title")
-                
                 html_snippet = data.get("html", "")
-                soup = BeautifulSoup(html_snippet, 'html.parser')
                 
+                soup = BeautifulSoup(html_snippet, 'html.parser')
                 block_quote = soup.find("blockquote")
                 if block_quote:
                     description = block_quote.get_text(strip=True)
                 
-                id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet)
+                # Extract User/Page ID from SDK URL or data attributes
+                id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
                 if id_match:
                     user_id = id_match.group(1)
 
-            # Step 2: Fallback to Facebook External Hit Crawler Headers on Target URL
-            if not name or name == "Facebook - log in or sign up":
-                fb_headers = {
-                    "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                }
-                raw_response = requests.get(profile_url, headers=fb_headers, timeout=10)
+            # Fast parallel metadata check if oEmbed misses image/ID
+            if not profile_pic or not user_id:
+                raw_response = requests.get(profile_url, headers=headers, timeout=4)
                 if raw_response.status_code == 200:
-                    raw_soup = BeautifulSoup(raw_response.text, 'html.parser')
+                    raw_text = raw_response.text
                     
-                    og_title = raw_soup.find("meta", property="og:title")
-                    og_image = raw_soup.find("meta", property="og:image")
-                    og_description = raw_soup.find("meta", property="og:description")
-                    
-                    if og_title and og_title.get("content"):
-                        extracted_title = og_title["content"]
-                        if "Facebook" not in extracted_title and "Log in" not in extracted_title:
-                            name = extracted_title
-                    
-                    if og_image and og_image.get("content"):
-                        profile_pic = og_image["content"]
-                    
-                    if og_description and og_description.get("content"):
-                        desc_text = og_description["content"]
-                        if "log in or sign up" not in desc_text.lower():
-                            description = desc_text
+                    # Extract profile picture from og:image
+                    og_image_match = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                    if og_image_match:
+                        profile_pic = og_image_match.group(1)
+                        # Extract user ID directly from lookaside media query parameter if available (e.g., media_id=4)
+                        media_id_match = re.search(r'media_id=(\d+)', profile_pic)
+                        if media_id_match and not user_id:
+                            user_id = media_id_match.group(1)
+
+                    if not name:
+                        og_title_match = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                        if og_title_match:
+                            name = og_title_match.group(1).replace(" | Facebook", "")
+
+                    if not description:
+                        og_desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                        if og_desc_match:
+                            description = og_desc_match.group(1)
+
+            # Fallback user ID extraction via graph/profile patterns if still missing
+            if not user_id:
+                profile_id_match = re.search(r'"entity_id":"(\d+)"', response.text if 'response' in locals() else "")
+                if profile_id_match:
+                    user_id = profile_id_match.group(1)
 
             if not name or "Facebook - log in" in name or name == "Facebook":
                 self._send_json(
@@ -151,13 +154,16 @@ class handler(BaseHTTPRequestHandler):
                 found_emails = list(set(re.findall(email_pattern, description)))
                 found_phones = list(set(re.findall(phone_pattern, description)))
 
-                followers_match = re.search(r'([\d.,]+[KkMmBb]?)\s*followers', description, re.IGNORECASE)
+                # Flexible followers and likes matching
+                followers_match = re.search(r'([\d.,]+[KkMmBb]?)\s*(?:followers|subscribers)', description, re.IGNORECASE)
                 if followers_match:
                     followers = followers_match.group(1)
-
-                likes_match = re.search(r'([\d.,]+[KkMmBb]?)\s*likes', description, re.IGNORECASE)
-                if likes_match:
-                    likes = likes_match.group(1)
+                else:
+                    # If page shows likes instead of followers, duplicate likes value into followers for compatibility if needed
+                    likes_match = re.search(r'([\d.,]+[KkMmBb]?)\s*likes', description, re.IGNORECASE)
+                    if likes_match:
+                        likes = likes_match.group(1)
+                        followers = likes  # Map likes to followers if explicit follower count string is missing on legacy pages
 
             result_data = {
                 "user_id": user_id,
