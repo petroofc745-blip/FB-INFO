@@ -64,66 +64,85 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(
                 400, 
                 success=False, 
-                error_message="Username parameter is required. Usage: /api?key=PETRO&username=meta",
+                error_message="Username parameter is required. Usage: /api?key=PETRO&username=zuck",
                 start_time=start_time
             )
             return
 
         try:
-            # Use mbasic.facebook.com to bypass standard Facebook server blocks
-            target_url = f"https://mbasic.facebook.com/{username}"
-
+            profile_url = f"https://www.facebook.com/{username}"
+            
+            # Step 1: Query Facebook's Public oEmbed Plugin Endpoint
+            oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={profile_url}"
+            
             headers = {
-                "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+                "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1"
+                "Accept": "application/json,text/html,*/*"
             }
 
-            session = requests.Session()
-            response = session.get(target_url, headers=headers, timeout=10, allow_redirects=True)
+            response = requests.get(oembed_url, headers=headers, timeout=10)
+            
+            name = None
+            user_id = None
+            profile_pic = None
+            description = None
+            
+            if response.status_code == 200:
+                data = response.json()
+                name = data.get("title")
+                
+                # Extract details from HTML payload inside oEmbed response
+                html_snippet = data.get("html", "")
+                soup = BeautifulSoup(html_snippet, 'html.parser')
+                
+                block_quote = soup.find("blockquote")
+                if block_quote:
+                    description = block_quote.get_text(strip=True)
+                
+                # Extract Page/User ID from SDK URL
+                id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet)
+                if id_match:
+                    user_id = id_match.group(1)
 
-            if response.status_code != 200:
+            # Step 2: Fallback to Facebook External Hit Crawler Headers on Target URL
+            if not name or name == "Facebook - log in or sign up":
+                fb_headers = {
+                    "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                }
+                raw_response = requests.get(profile_url, headers=fb_headers, timeout=10)
+                if raw_response.status_code == 200:
+                    raw_soup = BeautifulSoup(raw_response.text, 'html.parser')
+                    
+                    og_title = raw_soup.find("meta", property="og:title")
+                    og_image = raw_soup.find("meta", property="og:image")
+                    og_description = raw_soup.find("meta", property="og:description")
+                    
+                    if og_title and og_title.get("content"):
+                        extracted_title = og_title["content"]
+                        if "Facebook" not in extracted_title and "Log in" not in extracted_title:
+                            name = extracted_title
+                    
+                    if og_image and og_image.get("content"):
+                        profile_pic = og_image["content"]
+                    
+                    if og_description and og_description.get("content"):
+                        desc_text = og_description["content"]
+                        if "log in or sign up" not in desc_text.lower():
+                            description = desc_text
+
+            # Validate whether the extraction succeeded
+            if not name or "Facebook - log in" in name or name == "Facebook":
                 self._send_json(
-                    400, 
+                    404, 
                     success=False, 
-                    error_message=f"Facebook blocked request with HTTP status {response.status_code}",
+                    error_message="Profile data is private or restricted by Facebook login constraints.",
                     start_time=start_time
                 )
                 return
 
-            html_text = response.text
-            soup = BeautifulSoup(html_text, 'html.parser')
-
-            # OpenGraph and Meta Extractors
-            og_title = soup.find("meta", property="og:title") or soup.find("title")
-            og_image = soup.find("meta", property="og:image")
-            og_url = soup.find("meta", property="og:url")
-            og_description = soup.find("meta", property="og:description")
-            og_type = soup.find("meta", property="og:type")
-            locale = soup.find("meta", property="og:locale")
-
-            name = og_title["content"] if og_title and og_title.has_attr("content") else (og_title.string if og_title else None)
-            profile_pic = og_image["content"] if og_image and og_image.has_attr("content") else None
-            profile_url = og_url["content"] if og_url and og_url.has_attr("content") else f"https://www.facebook.com/{username}"
-            description = og_description["content"] if og_description and og_description.has_attr("content") else None
-            page_type = og_type["content"] if og_type and og_type.has_attr("content") else None
-            profile_locale = locale["content"] if locale and locale.has_attr("content") else None
-
-            # Clean name formatting
-            if name:
-                name = name.replace(" | Facebook", "").replace(" - Home", "").strip()
-
-            # Extract numeric user/page ID
-            user_id = None
-            id_match = re.search(r'"entity_id":"(\d+)"', html_text) or re.search(r'fb://profile/(\d+)', html_text) or re.search(r'page_id=(\d+)', html_text) or re.search(r'rid=(\d+)', html_text)
-            if id_match:
-                user_id = id_match.group(1)
-
+            # Extract contacts using regex
             found_emails = []
             found_phones = []
             followers = None
@@ -144,24 +163,12 @@ class handler(BaseHTTPRequestHandler):
                 if likes_match:
                     likes = likes_match.group(1)
 
-            # Check if login wall blocked extraction completely
-            if not name and not profile_pic:
-                self._send_json(
-                    404, 
-                    success=False, 
-                    error_message="Profile data restricted or blocked by Facebook login wall.",
-                    start_time=start_time
-                )
-                return
-
             result_data = {
                 "user_id": user_id,
                 "username_or_id": username,
                 "name": name,
                 "profile_picture": profile_pic,
                 "profile_url": profile_url,
-                "type": page_type,
-                "locale": profile_locale,
                 "bio_description": description,
                 "page_stats": {
                     "followers": followers,
