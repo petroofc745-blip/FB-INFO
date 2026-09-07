@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
+import concurrent.futures
 
 VALID_API_KEY = "PETRO"
 
@@ -79,57 +80,74 @@ class handler(BaseHTTPRequestHandler):
                 "Accept": "application/json,text/html,*/*"
             }
 
-            # Fast single oEmbed fetch (increased timeout to prevent premature read timeouts)
-            response = requests.get(oembed_url, headers=headers, timeout=8)
+            # Fetch oEmbed and profile page concurrently in parallel to maximize speed and prevent timeouts
+            def fetch_oembed():
+                try:
+                    return requests.get(oembed_url, headers=headers, timeout=6)
+                except Exception:
+                    return None
+
+            def fetch_profile():
+                try:
+                    return requests.get(profile_url, headers=headers, timeout=6)
+                except Exception:
+                    return None
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_oembed = executor.submit(fetch_oembed)
+                future_profile = executor.submit(fetch_profile)
+                
+                response = future_oembed.result()
+                raw_response = future_profile.result()
             
             name = None
             user_id = None
             profile_pic = None
             description = None
             
-            if response.status_code == 200:
-                data = response.json()
-                name = data.get("title")
-                html_snippet = data.get("html", "")
-                
-                soup = BeautifulSoup(html_snippet, 'html.parser')
-                block_quote = soup.find("blockquote")
-                if block_quote:
-                    description = block_quote.get_text(strip=True)
-                
-                # Extract User/Page ID from SDK URL or data attributes
-                id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
-                if id_match:
-                    user_id = id_match.group(1)
-
-            # Fast parallel metadata check if oEmbed misses image/ID
-            if not profile_pic or not user_id:
-                raw_response = requests.get(profile_url, headers=headers, timeout=8)
-                if raw_response.status_code == 200:
-                    raw_text = raw_response.text
+            if response and response.status_code == 200:
+                try:
+                    data = response.json()
+                    name = data.get("title")
+                    html_snippet = data.get("html", "")
                     
-                    # Extract profile picture from og:image
-                    og_image_match = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
-                    if og_image_match:
-                        profile_pic = og_image_match.group(1)
-                        # Extract user ID directly from lookaside media query parameter if available (e.g., media_id=4)
-                        media_id_match = re.search(r'media_id=(\d+)', profile_pic)
-                        if media_id_match and not user_id:
-                            user_id = media_id_match.group(1)
+                    soup = BeautifulSoup(html_snippet, 'html.parser')
+                    block_quote = soup.find("blockquote")
+                    if block_quote:
+                        description = block_quote.get_text(strip=True)
+                    
+                    # Extract User/Page ID from SDK URL or data attributes
+                    id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
+                    if id_match:
+                        user_id = id_match.group(1)
+                except Exception:
+                    pass
 
-                    if not name:
-                        og_title_match = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
-                        if og_title_match:
-                            name = og_title_match.group(1).replace(" | Facebook", "")
+            if raw_response and raw_response.status_code == 200:
+                raw_text = raw_response.text
+                
+                # Extract profile picture from og:image
+                og_image_match = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                if og_image_match:
+                    profile_pic = og_image_match.group(1)
+                    # Extract user ID directly from lookaside media query parameter if available (e.g., media_id=4)
+                    media_id_match = re.search(r'media_id=(\d+)', profile_pic)
+                    if media_id_match and not user_id:
+                        user_id = media_id_match.group(1)
 
-                    if not description:
-                        og_desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
-                        if og_desc_match:
-                            description = og_desc_match.group(1)
+                if not name:
+                    og_title_match = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                    if og_title_match:
+                        name = og_title_match.group(1).replace(" | Facebook", "")
+
+                if not description:
+                    og_desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                    if og_desc_match:
+                        description = og_desc_match.group(1)
 
             # Fallback user ID extraction via graph/profile patterns if still missing
-            if not user_id:
-                profile_id_match = re.search(r'"entity_id":"(\d+)"', response.text if 'response' in locals() else "")
+            if not user_id and response:
+                profile_id_match = re.search(r'"entity_id":"(\d+)"', response.text)
                 if profile_id_match:
                     user_id = profile_id_match.group(1)
 
