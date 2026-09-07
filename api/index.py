@@ -74,12 +74,11 @@ class handler(BaseHTTPRequestHandler):
             oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={profile_url}"
             
             headers = {
-                "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "application/json,text/html,*/*"
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             }
 
-            # Single fast network call
             response = requests.get(oembed_url, headers=headers, timeout=2.5)
             
             name = None
@@ -88,30 +87,54 @@ class handler(BaseHTTPRequestHandler):
             description = None
             
             if response.status_code == 200:
-                data = response.json()
-                name = data.get("title")
-                html_snippet = data.get("html", "")
-                
-                soup = BeautifulSoup(html_snippet, 'html.parser')
-                block_quote = soup.find("blockquote")
-                if block_quote:
-                    description = block_quote.get_text(strip=True)
-                
-                # Extract IDs and profile info directly from the single HTML snippet
-                id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
-                if id_match:
-                    user_id = id_match.group(1)
+                try:
+                    data = response.json()
+                    name = data.get("title")
+                    html_snippet = data.get("html", "")
+                    
+                    soup = BeautifulSoup(html_snippet, 'html.parser')
+                    block_quote = soup.find("blockquote")
+                    if block_quote:
+                        description = block_quote.get_text(strip=True)
+                    
+                    id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
+                    if id_match:
+                        user_id = id_match.group(1)
 
-                # Pull thumbnail/profile picture directly from snippet img if available
-                img_tag = soup.find("img")
-                if img_tag and img_tag.get("src"):
-                    profile_pic = img_tag["src"]
+                    img_tag = soup.find("img")
+                    if img_tag and img_tag.get("src"):
+                        profile_pic = img_tag["src"]
+                except Exception:
+                    pass
+
+            # Fallback direct HTML scrap if oEmbed fails or returns login wall title
+            if not name or "Facebook - log in" in name or name == "Facebook":
+                raw_response = requests.get(profile_url, headers=headers, timeout=2.5)
+                if raw_response.status_code == 200:
+                    raw_text = raw_response.text
+                    
+                    og_title = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                    if og_title:
+                        name = og_title.group(1).replace(" | Facebook", "")
+                        
+                    og_image = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                    if og_image:
+                        profile_pic = og_image.group(1)
+                        
+                    og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                    if og_desc:
+                        description = og_desc.group(1)
+
+                    # Try capturing numeric IDs from page scripts
+                    page_id_match = re.search(r'"page_id":"(\d+)"', raw_text) or re.search(r'"userID":"(\d+)"', raw_text) or re.search(r'entity_id":"(\d+)"', raw_text)
+                    if page_id_match:
+                        user_id = page_id_match.group(1)
 
             if not name or "Facebook - log in" in name or name == "Facebook":
                 self._send_json(
                     404, 
                     success=False, 
-                    error_message="Profile data is private or restricted by Facebook login constraints.",
+                    error_message="Profile data is restricted or requires cookie authentication.",
                     start_time=start_time
                 )
                 return
@@ -136,7 +159,7 @@ class handler(BaseHTTPRequestHandler):
                 if likes_match:
                     likes = likes_match.group(1)
                     if not followers:
-                        followers = likes  # Map likes count as the display metric if followers keyword isn't explicitly written
+                        followers = likes
 
             result_data = {
                 "user_id": user_id,
