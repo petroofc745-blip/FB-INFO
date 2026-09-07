@@ -70,99 +70,100 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            clean_user = username.strip().lower()
-            profile_url = f"https://www.facebook.com/{clean_user}"
+            profile_url = f"https://www.facebook.com/{username}"
+            oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={profile_url}"
             
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Cache-Control": "no-cache"
+                "Accept": "application/json,text/html,*/*"
             }
 
-            response = requests.get(profile_url, headers=headers, timeout=2.5)
+            # Fast single oEmbed fetch
+            response = requests.get(oembed_url, headers=headers, timeout=4)
             
             name = None
             user_id = None
             profile_pic = None
             description = None
-            followers = None
-            likes = None
             
             if response.status_code == 200:
-                raw_text = response.text
+                data = response.json()
+                name = data.get("title")
+                html_snippet = data.get("html", "")
                 
-                og_title = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
-                if og_title:
-                    name = og_title.group(1).replace(" | Facebook", "").strip()
-                    
-                og_image = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
-                if og_image:
-                    profile_pic = og_image.group(1)
-                    
-                og_desc = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
-                if og_desc:
-                    description = og_desc.group(1).strip()
-
-                id_match = re.search(r'"page_id":"(\d+)"', raw_text) or re.search(r'"userID":"(\d+)"', raw_text) or re.search(r'entity_id":"(\d+)"', raw_text) or re.search(r'profile_id["\s:]+(\d+)', raw_text)
+                soup = BeautifulSoup(html_snippet, 'html.parser')
+                block_quote = soup.find("blockquote")
+                if block_quote:
+                    description = block_quote.get_text(strip=True)
+                
+                # Extract User/Page ID from SDK URL or data attributes
+                id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
                 if id_match:
                     user_id = id_match.group(1)
 
-                followers_match = re.search(r'([\d.,]+[KkMmBb]?)\s*(?:followers|subscribers)', raw_text, re.IGNORECASE)
-                if followers_match:
-                    followers = followers_match.group(1)
-
-                likes_match = re.search(r'([\d.,]+[KkMmBb]?)\s*likes', raw_text, re.IGNORECASE)
-                if likes_match:
-                    likes = likes_match.group(1)
-
-            # Fallback for login-walled public pages using touch/mobile interface
-            if not name or "Log in" in name or name == "Facebook" or (description and "log in or sign up" in description.lower()):
-                touch_url = f"https://touch.facebook.com/{clean_user}"
-                touch_resp = requests.get(touch_url, headers=headers, timeout=2.0)
-                if touch_resp.status_code == 200:
-                    t_text = touch_resp.text
-                    t_title = re.search(r'<title>([^<]+)</title>', t_text)
-                    if t_title:
-                        clean_t = t_title.group(1).replace(" | Facebook", "").replace("Home", "").strip()
-                        if clean_t and "Log in" not in clean_t:
-                            name = clean_t
+            # Fast parallel metadata check if oEmbed misses image/ID
+            if not profile_pic or not user_id:
+                raw_response = requests.get(profile_url, headers=headers, timeout=4)
+                if raw_response.status_code == 200:
+                    raw_text = raw_response.text
                     
-                    t_img = re.search(r'src="(https://scontent[^"]+)"', t_text)
-                    if t_img:
-                        profile_pic = t_img.group(1).replace("&amp;", "&")
+                    # Extract profile picture from og:image
+                    og_image_match = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                    if og_image_match:
+                        profile_pic = og_image_match.group(1)
+                        # Extract user ID directly from lookaside media query parameter if available (e.g., media_id=4)
+                        media_id_match = re.search(r'media_id=(\d+)', profile_pic)
+                        if media_id_match and not user_id:
+                            user_id = media_id_match.group(1)
 
-                    t_desc = re.search(r'<meta name="description" content="([^"]+)"', t_text)
-                    if t_desc:
-                        description = t_desc.group(1).strip()
+                    if not name:
+                        og_title_match = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                        if og_title_match:
+                            name = og_title_match.group(1).replace(" | Facebook", "")
 
-            # Hardcoded high-utility fallback for known major entity or clean title capitalization
-            if not name or "Log in" in name or name == "Facebook":
-                name = username.replace(".", " ").title()
+                    if not description:
+                        og_desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                        if og_desc_match:
+                            description = og_desc_match.group(1)
 
-            if not description or "log in or sign up" in description.lower():
-                description = f"Official public profile and activity feed for {name} on Facebook."
-
+            # Fallback user ID extraction via graph/profile patterns if still missing
             if not user_id:
-                user_id = f"FB_{abs(hash(username)) % 900000000 + 100000000}"
+                profile_id_match = re.search(r'"entity_id":"(\d+)"', response.text if 'response' in locals() else "")
+                if profile_id_match:
+                    user_id = profile_id_match.group(1)
 
-            if not profile_pic:
-                profile_pic = f"https://graph.facebook.com/{username}/picture?type=large"
-
-            if not followers:
-                followers = "315M+" if clean_user == "mrbeast" else "Active Public Page"
-
-            if not likes:
-                likes = "290M+" if clean_user == "mrbeast" else "Verified"
+            if not name or "Facebook - log in" in name or name == "Facebook":
+                self._send_json(
+                    404, 
+                    success=False, 
+                    error_message="Profile data is private or restricted by Facebook login constraints.",
+                    start_time=start_time
+                )
+                return
 
             found_emails = []
             found_phones = []
+            followers = None
+            likes = None
 
             if description:
                 email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
                 phone_pattern = r'(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+
                 found_emails = list(set(re.findall(email_pattern, description)))
                 found_phones = list(set(re.findall(phone_pattern, description)))
+
+                # Flexible followers and likes matching
+                followers_match = re.search(r'([\d.,]+[KkMmBb]?)\s*(?:followers|subscribers)', description, re.IGNORECASE)
+                if followers_match:
+                    followers = followers_match.group(1)
+                else:
+                    # If page shows likes instead of followers, duplicate likes value into followers for compatibility if needed
+                    likes_match = re.search(r'([\d.,]+[KkMmBb]?)\s*likes', description, re.IGNORECASE)
+                    if likes_match:
+                        likes = likes_match.group(1)
+                        followers = likes  # Map likes to followers if explicit follower count string is missing on legacy pages
 
             result_data = {
                 "user_id": user_id,
