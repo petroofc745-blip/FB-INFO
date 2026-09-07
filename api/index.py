@@ -75,14 +75,10 @@ class handler(BaseHTTPRequestHandler):
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"'
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             }
 
-            # Try primary desktop endpoint with realistic browser headers
-            response = requests.get(profile_url, headers=headers, timeout=2.5)
+            response = requests.get(profile_url, headers=headers, timeout=2.0)
             
             name = None
             user_id = None
@@ -120,25 +116,51 @@ class handler(BaseHTTPRequestHandler):
                     if not followers:
                         followers = likes
 
-            # Ultimate Bypass: If Facebook returns login walls or blocks title, fallback to structured graph API search endpoint or graceful default display
+            # Fast Public Sharer & oEmbed Hybrid Fallback for Restricted Pages
             if not name or "Log in" in name or name == "Facebook" or "log in or sign up" in str(description).lower():
-                # Fallback API check via public sharing JSON interface
                 share_url = f"https://www.facebook.com/sharer/sharer.php?u={urllib.parse.quote(profile_url)}"
-                share_resp = requests.get(share_url, headers=headers, timeout=2.0)
+                share_resp = requests.get(share_url, headers=headers, timeout=1.8)
                 if share_resp.status_code == 200:
-                    share_soup = BeautifulSoup(share_resp.text, 'html.parser')
-                    title_tag = share_soup.find("title")
-                    if title_tag:
-                        clean_t = title_tag.get_text().replace(" | Facebook", "").strip()
+                    share_text = share_resp.text
+                    
+                    s_title = re.search(r'<meta property="og:title" content="([^"]+)"', share_text)
+                    if s_title:
+                        clean_t = s_title.group(1).replace(" | Facebook", "").strip()
                         if clean_t and "Log in" not in clean_t:
                             name = clean_t
 
-                # If still blocked, use capitalized fallback formatting so the API never hard-fails
+                    s_image = re.search(r'<meta property="og:image" content="([^"]+)"', share_text)
+                    if s_image:
+                        profile_pic = s_image.group(1)
+
+                    s_desc = re.search(r'<meta property="og:description" content="([^"]+)"', share_text)
+                    if s_desc:
+                        description = s_desc.group(1).strip()
+
                 if not name or "Log in" in name or name == "Facebook":
                     name = username.replace(".", " ").title()
-                    user_id = "Protected_ID"
                     description = f"Official public profile for {name} on Facebook."
-                    followers = "Visible on App"
+
+            # Extract likes/followers from description if found in fallback
+            if description:
+                if not likes:
+                    likes_match = re.search(r'([\d.,]+[KkMmBb]?)\s*likes', description, re.IGNORECASE)
+                    if likes_match:
+                        likes = likes_match.group(1)
+                if not followers:
+                    followers_match = re.search(r'([\d.,]+[KkMmBb]?)\s*(?:followers|subscribers)', description, re.IGNORECASE)
+                    if followers_match:
+                        followers = followers_match.group(1)
+                    elif likes:
+                        followers = likes
+
+            if not user_id and profile_pic:
+                media_id_match = re.search(r'media_id=(\d+)', profile_pic) or re.search(r'/v/t[\d.]+/(\d+)_', profile_pic)
+                if media_id_match:
+                    user_id = media_id_match.group(1)
+
+            if not user_id:
+                user_id = "Public_ID"
 
             found_emails = []
             found_phones = []
