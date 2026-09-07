@@ -92,7 +92,6 @@ class handler(BaseHTTPRequestHandler):
                 data = response.json()
                 name = data.get("title")
                 
-                # Extract details from HTML payload inside oEmbed response
                 html_snippet = data.get("html", "")
                 soup = BeautifulSoup(html_snippet, 'html.parser')
                 
@@ -100,7 +99,6 @@ class handler(BaseHTTPRequestHandler):
                 if block_quote:
                     description = block_quote.get_text(strip=True)
                 
-                # Extract Page/User ID from SDK URL
                 id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet)
                 if id_match:
                     user_id = id_match.group(1)
@@ -132,7 +130,6 @@ class handler(BaseHTTPRequestHandler):
                         if "log in or sign up" not in desc_text.lower():
                             description = desc_text
 
-            # Validate whether the extraction succeeded
             if not name or "Facebook - log in" in name or name == "Facebook":
                 self._send_json(
                     404, 
@@ -142,7 +139,6 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            # Extract contacts using regex
             found_emails = []
             found_phones = []
             followers = None
