@@ -33,7 +33,6 @@ class handler(BaseHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path)
         query_params = urllib.parse.parse_qs(parsed_path.query)
 
-        # Check URL query params first, fallback to JSON body
         api_key = query_params.get('key', [None])[0]
         username = query_params.get('username', [None])[0]
 
@@ -52,7 +51,6 @@ class handler(BaseHTTPRequestHandler):
         self.process_request(api_key, username, start_time)
 
     def process_request(self, api_key, username, start_time):
-        # API Key Validation
         if not api_key or api_key != VALID_API_KEY:
             self._send_json(
                 401, 
@@ -62,12 +60,11 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        # Username Parameter Validation
         if not username:
             self._send_json(
                 400, 
                 success=False, 
-                error_message="Username parameter is required. Usage: ?key=PETRO&username=zuck",
+                error_message="Username parameter is required. Usage: /api?key=PETRO&username=zuck",
                 start_time=start_time
             )
             return
@@ -96,7 +93,6 @@ class handler(BaseHTTPRequestHandler):
             html_text = response.text
             soup = BeautifulSoup(html_text, 'html.parser')
 
-            # Meta Tags Extraction
             og_title = soup.find("meta", property="og:title")
             og_image = soup.find("meta", property="og:image")
             og_url = soup.find("meta", property="og:url")
@@ -111,17 +107,14 @@ class handler(BaseHTTPRequestHandler):
             page_type = og_type["content"] if og_type else None
             profile_locale = locale["content"] if locale else None
 
-            # Clean name string
             if name and " | Facebook" in name:
                 name = name.replace(" | Facebook", "").strip()
 
-            # Extract Numeric Facebook User/Page ID
             user_id = None
             id_match = re.search(r'"entity_id":"(\d+)"', html_text) or re.search(r'fb://profile/(\d+)', html_text) or re.search(r'al:android:url" content="fb://page/(\d+)', html_text)
             if id_match:
                 user_id = id_match.group(1)
 
-            # Contact & Stats Extraction via Regex
             found_emails = []
             found_phones = []
             followers = None
@@ -142,7 +135,6 @@ class handler(BaseHTTPRequestHandler):
                 if likes_match:
                     likes = likes_match.group(1)
 
-            # Login Wall Check
             if not name and not profile_pic:
                 self._send_json(
                     404, 
