@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 
+VALID_API_KEY = "PETRO"
+
 class handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
@@ -21,28 +23,51 @@ class handler(BaseHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path)
         query_params = urllib.parse.parse_qs(parsed_path.query)
 
+        api_key = query_params.get('key', [None])[0]
         username = query_params.get('username', [None])[0]
-        self.process_request(username, start_time)
+
+        self.process_request(api_key, username, start_time)
 
     def do_POST(self):
         start_time = time.time()
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+        parsed_path = urllib.parse.urlparse(self.path)
+        query_params = urllib.parse.parse_qs(parsed_path.query)
 
-        try:
-            body = json.loads(post_data.decode('utf-8'))
-            username = body.get('username')
-        except Exception:
-            username = None
+        # Check URL query params first, fallback to JSON body
+        api_key = query_params.get('key', [None])[0]
+        username = query_params.get('username', [None])[0]
 
-        self.process_request(username, start_time)
+        if not username or not api_key:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                body = json.loads(post_data.decode('utf-8'))
+                if not api_key:
+                    api_key = body.get('key')
+                if not username:
+                    username = body.get('username')
+            except Exception:
+                pass
 
-    def process_request(self, username, start_time):
+        self.process_request(api_key, username, start_time)
+
+    def process_request(self, api_key, username, start_time):
+        # API Key Validation
+        if not api_key or api_key != VALID_API_KEY:
+            self._send_json(
+                401, 
+                success=False, 
+                error_message="Invalid or missing API key. Access denied.",
+                start_time=start_time
+            )
+            return
+
+        # Username Parameter Validation
         if not username:
             self._send_json(
                 400, 
                 success=False, 
-                error_message="Username or Profile ID is required. Example: ?username=zuck",
+                error_message="Username parameter is required. Usage: ?key=PETRO&username=zuck",
                 start_time=start_time
             )
             return
@@ -71,7 +96,7 @@ class handler(BaseHTTPRequestHandler):
             html_text = response.text
             soup = BeautifulSoup(html_text, 'html.parser')
 
-            # Extract OpenGraph Meta Tags
+            # Meta Tags Extraction
             og_title = soup.find("meta", property="og:title")
             og_image = soup.find("meta", property="og:image")
             og_url = soup.find("meta", property="og:url")
@@ -90,13 +115,13 @@ class handler(BaseHTTPRequestHandler):
             if name and " | Facebook" in name:
                 name = name.replace(" | Facebook", "").strip()
 
-            # Extract Numeric Facebook User/Entity ID from raw source code or URLs
+            # Extract Numeric Facebook User/Page ID
             user_id = None
             id_match = re.search(r'"entity_id":"(\d+)"', html_text) or re.search(r'fb://profile/(\d+)', html_text) or re.search(r'al:android:url" content="fb://page/(\d+)', html_text)
             if id_match:
                 user_id = id_match.group(1)
 
-            # Contact Extraction via Regex
+            # Contact & Stats Extraction via Regex
             found_emails = []
             found_phones = []
             followers = None
@@ -117,7 +142,7 @@ class handler(BaseHTTPRequestHandler):
                 if likes_match:
                     likes = likes_match.group(1)
 
-            # Check if login wall blocked extraction
+            # Login Wall Check
             if not name and not profile_pic:
                 self._send_json(
                     404, 
