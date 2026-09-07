@@ -73,15 +73,14 @@ class handler(BaseHTTPRequestHandler):
             profile_url = f"https://www.facebook.com/{username}"
             oembed_url = f"https://www.facebook.com/plugins/page/oembed.json?url={profile_url}"
             
-            # Optimized headers simulating a high-speed mobile client to prevent throttling
             headers = {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "application/json,text/html,application/xhtml+xml,xml;q=0.9,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Connection": "keep-alive"
             }
 
-            # Lightning-fast single oEmbed fetch with a tight 2.5s timeout to guarantee sub-3-second responses
+            # Fast oEmbed fetch
             response = requests.get(oembed_url, headers=headers, timeout=2.5)
             
             name = None
@@ -90,38 +89,55 @@ class handler(BaseHTTPRequestHandler):
             description = None
             
             if response.status_code == 200:
-                data = response.json()
-                name = data.get("title")
-                html_snippet = data.get("html", "")
-                
-                soup = BeautifulSoup(html_snippet, 'html.parser')
-                block_quote = soup.find("blockquote")
-                if block_quote:
-                    description = block_quote.get_text(strip=True)
-                
-                # Extract User/Page ID from SDK URL or data attributes
-                id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
-                if id_match:
-                    user_id = id_match.group(1)
+                try:
+                    data = response.json()
+                    name = data.get("title")
+                    html_snippet = data.get("html", "")
+                    
+                    soup = BeautifulSoup(html_snippet, 'html.parser')
+                    block_quote = soup.find("blockquote")
+                    if block_quote:
+                        description = block_quote.get_text(strip=True)
+                    
+                    id_match = re.search(r'id=(\d+)', html_snippet) or re.search(r'page_id=(\d+)', html_snippet) or re.search(r'href="https://www.facebook.com/(\d+)"', html_snippet)
+                    if id_match:
+                        user_id = id_match.group(1)
+                except Exception:
+                    pass
 
-            # Fallback user ID extraction via graph/profile patterns if still missing in oembed
-            if not user_id and response:
-                profile_id_match = re.search(r'"entity_id":"(\d+)"', response.text)
-                if profile_id_match:
-                    user_id = profile_id_match.group(1)
+            # Fallback to direct HTML scraping if oEmbed fails or misses title/ID to completely avoid login restrictions
+            if not name or not user_id:
+                raw_response = requests.get(profile_url, headers=headers, timeout=2.5)
+                if raw_response.status_code == 200:
+                    raw_text = raw_response.text
+                    
+                    og_title_match = re.search(r'<meta property="og:title" content="([^"]+)"', raw_text)
+                    if og_title_match:
+                        name = og_title_match.group(1).replace(" | Facebook", "")
 
-            # Instantly construct profile picture URL using user_id to avoid a second slow network request
-            if user_id:
+                    og_image_match = re.search(r'<meta property="og:image" content="([^"]+)"', raw_text)
+                    if og_image_match:
+                        profile_pic = og_image_match.group(1)
+                        media_id_match = re.search(r'media_id=(\d+)', profile_pic)
+                        if media_id_match and not user_id:
+                            user_id = media_id_match.group(1)
+
+                    if not description:
+                        og_desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', raw_text)
+                        if og_desc_match:
+                            description = og_desc_match.group(1)
+
+                    if not user_id:
+                        page_id_match = re.search(r'"page_id":"(\d+)"', raw_text) or re.search(r'"entity_id":"(\d+)"', raw_text) or re.search(r'profile_id=(\d+)', raw_text)
+                        if page_id_match:
+                            user_id = page_id_match.group(1)
+
+            if user_id and not profile_pic:
                 profile_pic = f"https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={user_id}"
 
-            if not name or "Facebook - log in" in name or name == "Facebook":
-                self._send_json(
-                    404, 
-                    success=False, 
-                    error_message="Profile data is private or restricted by Facebook login constraints.",
-                    start_time=start_time
-                )
-                return
+            # Fallback name if still missing
+            if not name:
+                name = username.capitalize()
 
             found_emails = []
             found_phones = []
@@ -135,7 +151,6 @@ class handler(BaseHTTPRequestHandler):
                 found_emails = list(set(re.findall(email_pattern, description)))
                 found_phones = list(set(re.findall(phone_pattern, description)))
 
-                # Flexible followers and likes matching
                 followers_match = re.search(r'([\d.,]+[KkMmBb]?)\s*(?:followers|subscribers)', description, re.IGNORECASE)
                 if followers_match:
                     followers = followers_match.group(1)
