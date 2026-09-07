@@ -64,28 +64,34 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(
                 400, 
                 success=False, 
-                error_message="Username parameter is required. Usage: /api?key=PETRO&username=zuck",
+                error_message="Username parameter is required. Usage: /api?key=PETRO&username=meta",
                 start_time=start_time
             )
             return
 
         try:
-            target_url = f"https://www.facebook.com/{username}"
+            # Use mbasic.facebook.com to bypass standard Facebook server blocks
+            target_url = f"https://mbasic.facebook.com/{username}"
 
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Connection": "keep-alive"
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1"
             }
 
-            response = requests.get(target_url, headers=headers, timeout=10)
+            session = requests.Session()
+            response = session.get(target_url, headers=headers, timeout=10, allow_redirects=True)
 
             if response.status_code != 200:
                 self._send_json(
                     400, 
                     success=False, 
-                    error_message=f"Unable to fetch profile. HTTP Status Code: {response.status_code}",
+                    error_message=f"Facebook blocked request with HTTP status {response.status_code}",
                     start_time=start_time
                 )
                 return
@@ -93,25 +99,28 @@ class handler(BaseHTTPRequestHandler):
             html_text = response.text
             soup = BeautifulSoup(html_text, 'html.parser')
 
-            og_title = soup.find("meta", property="og:title")
+            # OpenGraph and Meta Extractors
+            og_title = soup.find("meta", property="og:title") or soup.find("title")
             og_image = soup.find("meta", property="og:image")
             og_url = soup.find("meta", property="og:url")
             og_description = soup.find("meta", property="og:description")
             og_type = soup.find("meta", property="og:type")
             locale = soup.find("meta", property="og:locale")
 
-            name = og_title["content"] if og_title else None
-            profile_pic = og_image["content"] if og_image else None
-            profile_url = og_url["content"] if og_url else target_url
-            description = og_description["content"] if og_description else None
-            page_type = og_type["content"] if og_type else None
-            profile_locale = locale["content"] if locale else None
+            name = og_title["content"] if og_title and og_title.has_attr("content") else (og_title.string if og_title else None)
+            profile_pic = og_image["content"] if og_image and og_image.has_attr("content") else None
+            profile_url = og_url["content"] if og_url and og_url.has_attr("content") else f"https://www.facebook.com/{username}"
+            description = og_description["content"] if og_description and og_description.has_attr("content") else None
+            page_type = og_type["content"] if og_type and og_type.has_attr("content") else None
+            profile_locale = locale["content"] if locale and locale.has_attr("content") else None
 
-            if name and " | Facebook" in name:
-                name = name.replace(" | Facebook", "").strip()
+            # Clean name formatting
+            if name:
+                name = name.replace(" | Facebook", "").replace(" - Home", "").strip()
 
+            # Extract numeric user/page ID
             user_id = None
-            id_match = re.search(r'"entity_id":"(\d+)"', html_text) or re.search(r'fb://profile/(\d+)', html_text) or re.search(r'al:android:url" content="fb://page/(\d+)', html_text)
+            id_match = re.search(r'"entity_id":"(\d+)"', html_text) or re.search(r'fb://profile/(\d+)', html_text) or re.search(r'page_id=(\d+)', html_text) or re.search(r'rid=(\d+)', html_text)
             if id_match:
                 user_id = id_match.group(1)
 
@@ -135,6 +144,7 @@ class handler(BaseHTTPRequestHandler):
                 if likes_match:
                     likes = likes_match.group(1)
 
+            # Check if login wall blocked extraction completely
             if not name and not profile_pic:
                 self._send_json(
                     404, 
